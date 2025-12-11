@@ -4,7 +4,7 @@ import sys
 import threading
 
 # --- 設定區域 ---
-# 如果在同一台電腦測試，PC端用 COM5，這裡建議用 COM6 (需搭配虛擬 COM Port 軟體)
+# 若在同一台電腦測試，PC端用 COM5，這裡建議用 COM6 (需搭配虛擬 COM Port)
 DUT_PORT = '/dev/tty.usbserial-A5069RR4' #'COM6' 
 BAUDRATE = 115200
 
@@ -13,75 +13,85 @@ HEADER = b'Loewe test '
 END_BYTE = b'\x0d'
 
 # --- 待測物全域狀態 (模擬 RAM) ---
-# 這些變數會被兩個執行緒共用：
-# 1. UART Thread: 讀取這些值回傳給 PC，或被 PC 寫入修改
-# 2. Main Thread: 使用者透過鍵盤修改這些值 (模擬實體操作)
 device_state = {
-    "volume": 8,            # 預設音量
-    "button_status": "None", # 目前按鍵狀態
+    "volume": 8,            
+    "button_status": "None", 
     "bt_addr": "00:11:22:33:44:55",
     "fw_ver": "v1.0.5",
     "test_mode": False
 }
 
-running = True # 程式執行旗標
+# --- 通訊紀錄 (用於顯示在選單上) ---
+last_log = {
+    "rx": "無",
+    "tx": "無",
+    "time": "-"
+}
+
+running = True 
 
 def handle_command(cmd, param):
     """
-    根據 CMD Hex 處理邏輯，讀取或寫入 device_state
+    處理指令並產生 Log
     """
-    global device_state
+    global device_state, last_log
     
     cmd_int = int.from_bytes(cmd, byteorder='big')
     param_int = int.from_bytes(param, byteorder='big')
     
-    # Debug 顯示收到的指令
-    # print(f"\n[UART] 收到 CMD: {hex(cmd_int)}, PARAM: {hex(param_int)}")
-
-    response_msg = ""
+    # 1. 準備 Log 資訊 (RX)
+    rx_str = f"CMD: {hex(cmd_int)} | PARAM: {hex(param_int)}"
     
+    # 2. 處理邏輯
+    response_msg = ""
     if cmd_int == 0x00: # FirmwareVer
         response_msg = device_state["fw_ver"]
-        
     elif cmd_int == 0x01: # BT Address
         response_msg = device_state["bt_addr"]
-        
     elif cmd_int == 0x02: # GetButton
-        # 回傳目前模擬的按鍵狀態
         response_msg = device_state["button_status"]
-        # 模擬按鍵放開 (Read on clear)，讀取後自動歸零，視需求而定
-        # device_state["button_status"] = "None" 
-        
     elif cmd_int == 0x04: # MagicLed
         response_msg = "OK"
-        
-    elif cmd_int == 0x0C: # SetVolume (PC 設定音量)
+    elif cmd_int == 0x0C: # SetVolume
         if 0 <= param_int <= 15:
             device_state["volume"] = param_int
             response_msg = f"OK (Vol:{param_int})"
         else:
-            response_msg = "Error: Range 0-15"
-            
+            response_msg = "Error: Range"
     elif cmd_int == 0x99: # TestMode
         device_state["test_mode"] = (param_int == 0x01)
         status = "ON" if device_state["test_mode"] else "OFF"
         response_msg = f"Test Mode {status}"
-        
     else:
         response_msg = "Unknown CMD"
 
-    # 包裝回應 ACK
-    full_response = f"ACK: {response_msg}\r".encode('utf-8')
+    # 3. 準備 Log 資訊 (TX)
+    # 模擬實際回應格式 ACK: ...
+    tx_str = f"ACK: {response_msg}"
+    
+    # 更新全域 Log 變數 (給選單顯示用)
+    last_log["rx"] = rx_str
+    last_log["tx"] = tx_str
+    last_log["time"] = time.strftime("%H:%M:%S")
+
+    # 4.【即時顯示 Log】
+    # 使用 \r 清除當前行，避免與 input 打架，印完後重新顯示提示符
+    print(f"\n\n>>> [RX 接收] {rx_str}")
+    print(f">>> [TX 回應] {tx_str}\n")
+    print("請選擇模擬動作 (輸入): ", end="", flush=True)
+
+    # 5. 包裝實體回應資料
+    full_response = f"{tx_str}\r".encode('utf-8')
     return full_response
 
 def uart_listener_task():
     """
-    背景執行緒：專門負責 Serial Port 通訊
+    背景執行緒：監聽 Serial Port
     """
     global running
     try:
         ser = serial.Serial(DUT_PORT, BAUDRATE, timeout=0.1)
-        print(f"\n[System] UART 監聽中 ({DUT_PORT})...")
+        # print(f"\n[System] UART 監聽啟動 ({DUT_PORT})")
     except Exception as e:
         print(f"\n[Error] 無法開啟 {DUT_PORT}: {e}")
         running = False
@@ -95,7 +105,6 @@ def uart_listener_task():
                 data = ser.read(ser.in_waiting)
                 buffer += data
                 
-                # 處理封包 (Total Len = 14)
                 while len(buffer) >= 14:
                     if buffer.startswith(HEADER):
                         packet = buffer[:14]
@@ -107,7 +116,6 @@ def uart_listener_task():
                         if end_byte == END_BYTE:
                             resp = handle_command(cmd_byte, param_byte)
                             ser.write(resp)
-                            # print(f"[UART] 回傳: {resp}") # 為了不干擾選單顯示，可註解掉
                         
                         buffer = buffer[14:]
                     else:
@@ -115,82 +123,73 @@ def uart_listener_task():
             
             time.sleep(0.01)
         except Exception as e:
-            print(f"[Error] UART 錯誤: {e}")
+            print(f"[Error] UART Exception: {e}")
             break
             
     ser.close()
-    print("\n[System] UART 關閉")
 
 def print_status():
-    """顯示目前模擬器的狀態"""
-    print("\n--------------------------------")
-    print(f" [模擬器狀態]")
-    print(f" 音量 (Volume) : {device_state['volume']}")
-    print(f" 按鍵 (Button) : {device_state['button_status']}")
-    print(f" 測試模式      : {device_state['test_mode']}")
-    print("--------------------------------")
+    """顯示模擬器狀態面板"""
+    # 清畫面 (選擇性開啟，這裡為了 Log 保留不全清，只印分隔線)
+    print("\n" + "="*40)
+    print(f"      MCU 模擬器 - 狀態面板      ")
+    print("="*40)
+    print(f" [ 內部狀態 ]")
+    print(f" * 音量 (Volume) : {device_state['volume']}")
+    print(f" * 按鍵 (Button) : {device_state['button_status']}")
+    print(f" * 測試模式      : {device_state['test_mode']}")
+    print("-" * 40)
+    print(f" [ 最後一次通訊紀錄 @ {last_log['time']} ]")
+    print(f" * 收到: \033[93m{last_log['rx']}\033[0m") # 黃色文字
+    print(f" * 回應: \033[96m{last_log['tx']}\033[0m") # 青色文字
+    print("="*40)
 
 def main_menu():
-    """主執行緒：使用者互動選單"""
     global running, device_state
     
-    print("=== MCU 待測物模擬器啟動 ===")
-    print("說明: 您可以在此模擬實體按鍵與旋鈕操作，")
-    print("      PC 端程式查詢時會得到您設定的狀態。")
-
-    # 啟動 UART 執行緒
+    print(f"正在開啟 {DUT_PORT}...")
     t = threading.Thread(target=uart_listener_task)
     t.start()
-    
-    time.sleep(1) # 等待 UART 開啟
+    time.sleep(1) # 等待 Serial 開啟
+
+    if not running:
+        print("無法啟動程式，請檢查 COM Port。")
+        return
 
     while running:
         print_status()
-        print("請選擇模擬動作:")
-        print("1. 模擬 [音量 +] (Vol Up)")
-        print("2. 模擬 [音量 -] (Vol Down)")
-        print("3. 模擬 [按下 Play 鍵]")
-        print("4. 模擬 [按下 Power 鍵]")
-        print("5. 模擬 [釋放所有按鍵] (Release)")
-        print("Q. 離開程式")
+        print("1. 音量 + (Vol Up)")
+        print("2. 音量 - (Vol Down)")
+        print("3. 按下 Play 鍵")
+        print("4. 按下 Power 鍵")
+        print("5. 釋放按鍵 (Release)")
+        print("Q. 離開")
+        print("-" * 40)
         
-        choice = input("輸入: ").strip().upper()
+        # 這裡的 input 會被背景 thread 的 print 插隊，這是正常的
+        # 我們在 handle_command 裡加了補救措施
+        choice = input("請選擇模擬動作 (輸入): ").strip().upper()
         
         if choice == '1':
             if device_state["volume"] < 15:
                 device_state["volume"] += 1
-                print(">> 音量已增加")
-            else:
-                print(">> 音量已達最大值")
-                
         elif choice == '2':
             if device_state["volume"] > 0:
                 device_state["volume"] -= 1
-                print(">> 音量已降低")
-            else:
-                print(">> 音量已達最小值")
-                
         elif choice == '3':
             device_state["button_status"] = "Play Pressed"
-            print(">> 按鍵狀態設為: Play Pressed")
-            
         elif choice == '4':
             device_state["button_status"] = "Power Pressed"
-            print(">> 按鍵狀態設為: Power Pressed")
-            
         elif choice == '5':
             device_state["button_status"] = "None"
-            print(">> 按鍵狀態設為: None")
-            
         elif choice == 'Q':
-            print(">> 正在關閉...")
             running = False
             break
         else:
-            print(">> 無效輸入")
+            print("\n[!] 無效輸入")
 
-    t.join() # 等待 UART 執行緒結束
-    print("程式已結束")
+    t.join()
+    print("程式結束")
 
 if __name__ == "__main__":
     main_menu()
