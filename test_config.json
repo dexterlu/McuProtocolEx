@@ -1,0 +1,49 @@
+{
+    "uart_settings": {
+        "port": "COM5",
+        "baudrate": 115200,
+        "timeout": 1
+    },
+    "test_cases": [
+        {
+            "id": 1,
+            "name": "Get Firmware Version",
+            "cmd_hex": "0x00",
+            "param_hex": "0x00",
+            "expect_type": "contains",
+            "criteria": "v1.0"
+        },
+        {
+            "id": 2,
+            "name": "Get BT Address",
+            "cmd_hex": "0x01",
+            "param_hex": "0x00",
+            "expect_type": "length",
+            "criteria": 17
+        },
+        {
+            "id": 3,
+            "name": "Magic LED Red (Test)",
+            "cmd_hex": "0x04",
+            "param_hex": "0xFF",
+            "expect_type": "exact",
+            "criteria": "OK"
+        },
+        {
+            "id": 4,
+            "name": "Set Volume Max",
+            "cmd_hex": "0x0C",
+            "param_hex": "0x0F",
+            "expect_type": "exact",
+            "criteria": "OK"
+        },
+        {
+            "id": 5,
+            "name": "Enter Test Mode",
+            "cmd_hex": "0x99",
+            "param_hex": "0x01",
+            "expect_type": "exact",
+            "criteria": "Test Mode ON"
+        }
+    ]
+}
