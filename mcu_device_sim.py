@@ -17,18 +17,14 @@ device_state = {
     "bt_addr": "00:11:22:33:44:55",
     "fw_ver": "v1.0.5",
     "test_mode": False,
-    # 新增: 強制覆寫下一次的回應 (One-shot)
     "override_response": None 
 }
 
-# --- 通訊紀錄 ---
 last_log = {"rx": "無", "tx": "無", "time": "-"}
 running = True 
 
 def handle_command(cmd, param):
-    """
-    處理指令並產生 Log
-    """
+    """處理指令並產生 Log"""
     global device_state, last_log
     
     cmd_int = int.from_bytes(cmd, byteorder='big')
@@ -37,23 +33,15 @@ def handle_command(cmd, param):
     rx_str = f"CMD: {hex(cmd_int)} | PARAM: {hex(param_int)}"
     response_msg = ""
 
-    # === [新增邏輯] 檢查是否有強制回應 ===
     if device_state["override_response"] is not None:
         response_msg = device_state["override_response"]
-        # 清除強制回應 (只生效一次，避免永久錯誤)
         device_state["override_response"] = None
-        # 標記這是模擬的特殊回應
         rx_str += " (已觸發強制回應)"
     else:
-        # === 標準 Protocol 邏輯 ===
-        if cmd_int == 0x00: 
-            response_msg = device_state["fw_ver"]
-        elif cmd_int == 0x01: 
-            response_msg = device_state["bt_addr"]
-        elif cmd_int == 0x02: 
-            response_msg = device_state["button_status"]
-        elif cmd_int == 0x04: 
-            response_msg = "OK"
+        if cmd_int == 0x00: response_msg = device_state["fw_ver"]
+        elif cmd_int == 0x01: response_msg = device_state["bt_addr"]
+        elif cmd_int == 0x02: response_msg = device_state["button_status"]
+        elif cmd_int == 0x04: response_msg = "OK"
         elif cmd_int == 0x0C: 
             if 0 <= param_int <= 15:
                 device_state["volume"] = param_int
@@ -68,12 +56,10 @@ def handle_command(cmd, param):
             response_msg = "Unknown CMD"
 
     tx_str = f"ACK: {response_msg}"
-    
     last_log["rx"] = rx_str
     last_log["tx"] = tx_str
     last_log["time"] = time.strftime("%H:%M:%S")
 
-    # 即時顯示 Log
     print(f"\n\n>>> [RX 接收] {rx_str}")
     print(f">>> [TX 回應] {tx_str}\n")
     print("請選擇模擬動作 (輸入): ", end="", flush=True)
@@ -89,6 +75,11 @@ def uart_listener_task():
         print(f"\n[Error] 無法開啟 {DUT_PORT}: {e}")
         running = False
         return
+
+    # 把 ser 物件存到 global 或傳遞出去以便主動發送使用
+    # 這裡簡單處理：使用 global ser_instance 讓主執行緒存取
+    global ser_instance
+    ser_instance = ser
 
     buffer = b''
     while running:
@@ -109,23 +100,23 @@ def uart_listener_task():
             break
     ser.close()
 
+ser_instance = None # 全域變數，用來讓主選單發送資料
+
 def print_status():
-    override_status = device_state['override_response'] if device_state['override_response'] else "無 (正常模式)"
+    override_status = device_state['override_response'] if device_state['override_response'] else "無"
     print("\n" + "="*45)
     print(f"      MCU 模擬器 - 狀態面板      ")
     print("="*45)
-    print(f" [ 內部狀態 ]")
-    print(f" * 音量: {device_state['volume']} | 按鍵: {device_state['button_status']}")
-    print(f" * 測試模式: {device_state['test_mode']}")
-    print(f" * \033[93m強制回應 (Next Response): {override_status}\033[0m")
+    print(f" [ 內部狀態 ] Vol: {device_state['volume']} | Key: {device_state['button_status']}")
+    print(f" [ 除錯設定 ] 強制回應: {override_status}")
     print("-" * 45)
     print(f" [ 最後通訊 @ {last_log['time']} ]")
-    print(f" * 收到: {last_log['rx']}")
-    print(f" * 回應: \033[96m{last_log['tx']}\033[0m")
+    print(f" * RX: {last_log['rx']}")
+    print(f" * TX: \033[96m{last_log['tx']}\033[0m")
     print("="*45)
 
 def main_menu():
-    global running, device_state
+    global running, device_state, ser_instance
     
     print(f"正在開啟 {DUT_PORT}...")
     t = threading.Thread(target=uart_listener_task)
@@ -141,7 +132,8 @@ def main_menu():
         print("3. 按下 Play 鍵")
         print("4. 按下 Power 鍵")
         print("5. 釋放按鍵")
-        print("6. \033[93m設定下一次的強制回應 (Injection)\033[0m")
+        print("6. 設定下一次的強制回應 (Injection)")
+        print("7. \033[95m主動發送資料給 PC (Active Send)\033[0m") # 新增功能
         print("Q. 離開")
         print("-" * 45)
         
@@ -158,11 +150,21 @@ def main_menu():
         elif choice == '5':
             device_state["button_status"] = "None"
         elif choice == '6':
-            print("\n請輸入下一次 MCU 要回傳的字串 (例如: ERROR_BUSY)")
             msg = input("自訂回應內容: ").strip()
-            if msg:
-                device_state["override_response"] = msg
-                print(">> 設定完成！下一次收到任何指令都會回傳此內容。")
+            if msg: device_state["override_response"] = msg
+        elif choice == '7':
+            # === 主動發送邏輯 ===
+            print("\n請輸入要發送的內容 (例如: EVENT: PowerOn)")
+            msg = input("發送內容: ").strip()
+            if msg and ser_instance and ser_instance.is_open:
+                # 加上換行符號模擬完整封包
+                raw_data = f"{msg}\r".encode('utf-8')
+                ser_instance.write(raw_data)
+                last_log["tx"] = f"Active Send: {msg}"
+                last_log["time"] = time.strftime("%H:%M:%S")
+                print(f">> 已發送: {msg}")
+            else:
+                print(">> 發送失敗 (內容為空或 Port 未開啟)")
         elif choice == 'Q':
             running = False
             break
